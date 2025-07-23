@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Document AI Agent</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .container { display: flex; gap: 20px; }
+        .upload-section, .query-section { flex: 1; }
+        .card { border: 1px solid #ddd; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .upload-area { border: 2px dashed #ccc; padding: 40px; text-align: center; border-radius: 8px; }
+        .query-area { min-height: 200px; }
+        input[type="file"] { margin: 10px 0; }
+        button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .response { background: #f8f9fa; padding: 15px; border-radius: 4px; margin-top: 10px; }
+        .sources { background: #e9ecef; padding: 10px; border-radius: 4px; margin-top: 5px; font-size: 0.9em; }
+        textarea { width: 100%; height: 100px; margin: 10px 0; padding: 8px; }
+        .document-list { max-height: 300px; overflow-y: auto; }
+        .confidence { font-weight: bold; color: #28a745; }
+        .processing-time { color: #6c757d; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <h1>🤖 Document AI Agent</h1>
+    <p>Upload documents and ask questions based on their content.</p>
+    
+    <div class="container">
+        <div class="upload-section">
+            <div class="card">
+                <h3>📁 Upload Documents</h3>
+                <div class="upload-area">
+                    <input type="file" id="fileInput" accept=".pdf,.docx,.txt" multiple>
+                    <br>
+                    <button onclick="uploadFiles()">Upload Documents</button>
+                </div>
+                <div id="uploadStatus"></div>
+            </div>
+            
+            <div class="card">
+                <h3>📊 Uploaded Documents</h3>
+                <div id="documentList" class="document-list">
+                    <p>No documents uploaded yet.</p>
+                </div>
+                <button onclick="clearAllData()" style="background: #dc3545;">Clear All Data</button>
+            </div>
+        </div>
+        
+        <div class="query-section">
+            <div class="card query-area">
+                <h3>❓ Ask Questions</h3>
+                <textarea id="queryInput" placeholder="Enter your question about the uploaded documents..."></textarea>
+                <button onclick="askQuestion()">Ask Question</button>
+                <div id="queryResponse"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function uploadFiles() {
+            const fileInput = document.getElementById('fileInput');
+            const files = fileInput.files;
+            const statusDiv = document.getElementById('uploadStatus');
+            
+            if (files.length === 0) {
+                statusDiv.innerHTML = '<p style="color: red;">Please select files to upload.</p>';
+                return;
+            }
+            
+            statusDiv.innerHTML = '<p>Uploading and processing files...</p>';
+            
+            for (let file of files) {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                try {
+                    const response = await fetch('/upload-document/', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok) {
+                        statusDiv.innerHTML += `<p style="color: green;">✅ ${file.name}: ${result.chunk_count} chunks processed</p>`;
+                    } else {
+                        statusDiv.innerHTML += `<p style="color: red;">❌ ${file.name}: ${result.detail}</p>`;
+                    }
+                } catch (error) {
+                    statusDiv.innerHTML += `<p style="color: red;">❌ ${file.name}: Upload failed</p>`;
+                }
+            }
+            
+            loadDocumentList();
+            fileInput.value = '';
+        }
+        
+        async function askQuestion() {
+            const queryInput = document.getElementById('queryInput');
+            const responseDiv = document.getElementById('queryResponse');
+            const query = queryInput.value.trim();
+            
+            if (!query) {
+                responseDiv.innerHTML = '<p style="color: red;">Please enter a question.</p>';
+                return;
+            }
+            
+            responseDiv.innerHTML = '<p>Processing your question...</p>';
+            
+            try {
+                const response = await fetch('/query/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ query: query })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    responseDiv.innerHTML = `
+                        <div class="response">
+                            <h4>Response:</h4>
+                            <p>${result.response}</p>
+                            <div class="confidence">Confidence: ${(result.confidence * 100).toFixed(1)}%</div>
+                            <div class="processing-time">Processing time: ${result.processing_time.toFixed(2)}s</div>
+                        </div>
+                        <div class="sources">
+                            <h5>Sources:</h5>
+                            ${result.sources.map(source => `<div>• ${source}</div>`).join('')}
+                        </div>
+                    `;
+                } else {
+                    responseDiv.innerHTML = `<p style="color: red;">Error: ${result.detail}</p>`;
+                }
+            } catch (error) {
+                responseDiv.innerHTML = '<p style="color: red;">Failed to get response.</p>';
+            }
+        }
+        
+        async function loadDocumentList() {
+            try {
+                const response = await fetch('/documents/');
+                const documents = await response.json();
+                
+                const listDiv = document.getElementById('documentList');
+                
+                if (documents.length === 0) {
+                    listDiv.innerHTML = '<p>No documents uploaded yet.</p>';
+                } else {
+                    listDiv.innerHTML = documents.map(doc => `
+                        <div style="border-bottom: 1px solid #eee; padding: 8px 0;">
+                            <strong>${doc.filename}</strong><br>
+                            <small>Chunks: ${doc.chunk_count} | Uploaded: ${new Date(doc.upload_time).toLocaleString()}</small>
+                        </div>
+                    `).join('');
+                }
+            } catch (error) {
+                console.error('Failed to load document list:', error);
+            }
+        }
+        
+        async function clearAllData() {
+            if (confirm('Are you sure you want to clear all data? This cannot be undone.')) {
+                try {
+                    const response = await fetch('/clear-data/', { method: 'POST' });
+                    if (response.ok) {
+                        loadDocumentList();
+                        document.getElementById('queryResponse').innerHTML = '';
+                        alert('All data cleared successfully.');
+                    }
+                } catch (error) {
+                    alert('Failed to clear data.');
+                }
+            }
+        }
+        
+        // Load document list on page load
+        loadDocumentList();
+        
+        // Allow Ctrl+Enter to submit query
+        document.getElementById('queryInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                askQuestion();
+            }
+        });
+    </script>
