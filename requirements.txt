@@ -10,3 +10,4 @@ numpy
 pydantic
 python-jose[cryptography]
 aiofiles
+accelerate

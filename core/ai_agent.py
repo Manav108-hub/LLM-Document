@@ -28,6 +28,7 @@ class DocumentAIAgent:
         # Generation model components
         self.generator = None
         self.tokenizer = None
+        self.use_simple_generation = False
         
         # Document storage
         self.documents = []
@@ -42,26 +43,65 @@ class DocumentAIAgent:
         logger.info(f"DocumentAIAgent initialized with device: {self.device}")
 
     def initialize_generation_model(self):
-        """Lazy loading of generation model"""
+        """Initialize generation model with multiple fallback options"""
         if self.generator is None:
             logger.info("Loading generation model...")
-            self.tokenizer = AutoTokenizer.from_pretrained(config.GENERATION_MODEL)
-            model = AutoModelForCausalLM.from_pretrained(
-                config.GENERATION_MODEL,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                device_map="auto" if self.device == "cuda" else None
-            )
             
-            self.generator = pipeline(
-                "text-generation",
-                model=model,
-                tokenizer=self.tokenizer,
-                device=0 if self.device == "cuda" else -1,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
-            )
+            # Try different models in order of preference
+            models_to_try = [
+                "microsoft/DialoGPT-medium",  # Smaller than large
+                "distilgpt2",                 # Very lightweight
+                "gpt2"                        # Basic GPT-2
+            ]
             
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
+            for model_name in models_to_try:
+                try:
+                    logger.info(f"Attempting to load {model_name}...")
+                    
+                    self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    
+                    # Simple model loading without device_map complications
+                    model = AutoModelForCausalLM.from_pretrained(model_name)
+                    
+                    # Create pipeline with minimal parameters
+                    self.generator = pipeline(
+                        "text-generation",
+                        model=model,
+                        tokenizer=self.tokenizer,
+                        device=0 if self.device == "cuda" else -1
+                    )
+                    
+                    # Set pad token
+                    if self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                    
+                    logger.info(f"Successfully loaded {model_name}")
+                    break
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to load {model_name}: {e}")
+                    continue
+            
+            if self.generator is None:
+                logger.warning("All models failed to load, using simple text generation")
+                self.use_simple_generation = True
+
+    def _simple_text_generation(self, context: str, query: str) -> str:
+        """Fallback simple text generation when models fail"""
+        # Extract key sentences from context
+        sentences = re.split(r'[.!?]+', context)
+        relevant_sentences = [s.strip() for s in sentences if len(s.strip()) > 20][:3]
+        
+        if not relevant_sentences:
+            return "I found relevant information but couldn't process it properly."
+        
+        # Create a simple response
+        response = f"Based on your health insurance document, here's what I found:\n\n"
+        for i, sentence in enumerate(relevant_sentences, 1):
+            response += f"{i}. {sentence.strip()}.\n"
+        
+        response += f"\nThis information is related to your question: '{query}'"
+        return response
 
     async def process_document(self, file_path: str, filename: str) -> Dict:
         """Process a document and add it to the knowledge base"""
@@ -165,62 +205,76 @@ class DocumentAIAgent:
         start_time = datetime.now()
         
         try:
-            self.initialize_generation_model()
-            
-            # Retrieve relevant chunks
+            # Retrieve relevant chunks first
             relevant_chunks = self.retrieve_relevant_chunks(query)
             
             if not relevant_chunks:
                 return {
-                    'response': "I couldn't find relevant information in the uploaded documents to answer your question.",
+                    'response': "I couldn't find relevant information in the uploaded documents to answer your question. Please try rephrasing your question or upload more relevant documents.",
                     'confidence': 0.0,
                     'sources': [],
                     'processing_time': (datetime.now() - start_time).total_seconds()
                 }
             
-            # Prepare context
+            # Prepare context and sources
             context_parts = []
             sources = []
             
-            for i, chunk_info in enumerate(relevant_chunks[:5]):
-                context_parts.append(f"[Context {i+1}]: {chunk_info.text}")
+            for i, chunk_info in enumerate(relevant_chunks[:3]):  # Use fewer chunks for better processing
+                context_parts.append(chunk_info.text)
                 sources.append(f"{chunk_info.metadata.get('filename', 'Unknown')} (Score: {chunk_info.score:.3f})")
             
             context = "\n\n".join(context_parts)
             
-            # Create prompt
-            prompt = f"""Based on the following context from uploaded documents, provide a comprehensive and accurate answer to the question. If the context doesn't contain enough information, acknowledge the limitation.
-
-Context:
-{context}
+            # Try to initialize and use the generation model
+            try:
+                self.initialize_generation_model()
+                
+                if self.use_simple_generation or self.generator is None:
+                    # Use simple generation fallback
+                    response = self._simple_text_generation(context, query)
+                else:
+                    # Use the actual generation model
+                    prompt = f"""Context from health insurance document:
+{context[:1000]}  
 
 Question: {query}
 
-Instructions: Provide a detailed, well-structured answer based on the context. Be specific and cite relevant information when possible.
+Answer based on the context above:"""
 
-Answer:"""
-            
-            # Generate response
-            response_output = self.generator(
-                prompt,
-                max_new_tokens=config.MAX_RESPONSE_LENGTH,
-                temperature=config.TEMPERATURE,
-                do_sample=True,
-                top_p=0.9,
-                top_k=50,
-                repetition_penalty=1.1,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id
-            )
-            
-            # Extract response
-            generated_text = response_output[0]['generated_text']
-            response = generated_text[len(prompt):].strip()
-            response = re.sub(r'\n+', '\n', response).strip()
+                    try:
+                        generated = self.generator(
+                            prompt,
+                            max_length=len(prompt) + 200,
+                            max_new_tokens=150,
+                            temperature=0.7,
+                            do_sample=True,
+                            pad_token_id=self.tokenizer.eos_token_id,
+                            eos_token_id=self.tokenizer.eos_token_id,
+                            truncation=True
+                        )
+                        
+                        full_text = generated[0]['generated_text']
+                        response = full_text[len(prompt):].strip()
+                        
+                        # Clean up the response
+                        response = re.sub(r'\n+', '\n', response).strip()
+                        
+                        # If response is too short or empty, use fallback
+                        if len(response.strip()) < 20:
+                            response = self._simple_text_generation(context, query)
+                            
+                    except Exception as gen_error:
+                        logger.error(f"Generation error: {gen_error}")
+                        response = self._simple_text_generation(context, query)
+                        
+            except Exception as model_error:
+                logger.error(f"Model initialization error: {model_error}")
+                response = self._simple_text_generation(context, query)
             
             # Calculate confidence
             weights = [chunk_info.score for chunk_info in relevant_chunks]
-            confidence = np.average(weights, weights=weights) if weights else 0.0
+            confidence = np.mean(weights) if weights else 0.0
             
             processing_time = (datetime.now() - start_time).total_seconds()
             

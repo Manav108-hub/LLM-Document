@@ -1,4 +1,5 @@
 import os
+import torch
 from pathlib import Path
 
 class Config:
@@ -17,8 +18,18 @@ class Config:
     UPLOAD_DIR = Path("uploads")
     DATA_DIR = Path("data")
     
-    # Device
-    DEVICE = "cuda" if os.system("nvidia-smi") == 0 else "cpu"
+    # Device detection with better compatibility
+    @property
+    def DEVICE(self):
+        """Dynamically determine the best device to use"""
+        if torch.cuda.is_available():
+            try:
+                # Test if CUDA actually works
+                torch.cuda.current_device()
+                return "cuda"
+            except Exception:
+                return "cpu"
+        return "cpu"
     
     # File settings
     ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.txt'}
@@ -28,5 +39,12 @@ class Config:
         # Create directories
         self.UPLOAD_DIR.mkdir(exist_ok=True)
         self.DATA_DIR.mkdir(exist_ok=True)
+        
+        # Log device info
+        device = self.DEVICE
+        print(f"Using device: {device}")
+        if device == "cuda":
+            print(f"CUDA device: {torch.cuda.get_device_name()}")
+            print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
 config = Config()
